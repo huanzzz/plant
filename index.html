@@ -4,44 +4,51 @@
   <meta charset="UTF-8" />
   <title>植物识别演示 - TFJS 模型</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px; color: #222; }
-    h1 { font-size: 20px; margin-bottom: 8px; }
-    .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
-    .row { display: flex; gap: 16px; flex-wrap: wrap; }
-    .img-wrap { width: 320px; min-height: 240px; border: 1px dashed #cbd5e1; border-radius: 8px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #f8fafc; }
-    #preview { max-width: 100%; max-height: 320px; }
-    button, input[type="file"] { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; cursor: pointer; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    .status { font-size: 13px; color: #555; }
-    .results { margin-top: 8px; }
-    .result-item { display: flex; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid #eee; }
-    .result-item:last-child { border-bottom: none; }
-    .small { font-size: 12px; color: #666; }
-    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px; padding: 2px 6px; }
-  </style>
+  <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
 </head>
 <body>
-  <h1>植物识别演示（TFJS）</h1>
+  <div class="container">
+    <header>
+      <h1>🌿 植物识别实验平台</h1>
+      <div class="subtitle">欢仔小组</div>
+    </header>
 
-  <div class="card">
-    <div class="status" id="status">正在加载模型…</div>
-    <div class="small">模型路径：<span class="kbd" id="modelPath"></span></div>
-  </div>
 
-  <div class="card">
-    <div class="row">
-      <div>
-        <input type="file" id="fileInput" accept="image/*" />
-        <button id="predictBtn" disabled>开始识别</button>
-        <div class="small">提示：选择一张植物图片后点击识别</div>
+
+    <div class="main-content">
+      <div class="card">
+        <div class="card-title">上传植物图片</div>
+        <div class="upload-section">
+          <div class="file-input-wrapper">
+            <label class="file-input-label">
+              📁 选择图片文件
+              <input type="file" id="fileInput" accept="image/*" />
+            </label>
+          </div>
+          <button class="predict-btn" id="predictBtn" disabled>🔍 开始识别</button>
+          <div class="small">支持 JPG、PNG 格式，最大 10MB</div>
+        </div>
       </div>
-      <div class="img-wrap">
-        <img id="preview" alt="图片预览" />
+
+      <div class="card">
+        <div class="card-title">识别结果预览</div>
+        <div class="preview-section">
+          <div class="img-wrap" id="imgWrap">
+            <div class="placeholder-text">请上传植物图片进行识别</div>
+            <img id="preview" alt="图片预览" style="display: none;" />
+          </div>
+          <div class="results" id="results"></div>
+        </div>
       </div>
     </div>
-    <div class="results" id="results"></div>
+
+    <div class="card status-card">
+      <div class="status" id="status">
+        <span class="loading"></span> 正在加载模型…
+      </div>
+      <div class="model-info">模型路径：<span class="kbd" id="modelPath"></span></div>
+    </div>
   </div>
 
   <script>
@@ -51,6 +58,8 @@
     const PREVIEW = document.getElementById('preview');
     const PREDICT_BTN = document.getElementById('predictBtn');
     const RESULTS = document.getElementById('results');
+    const IMG_WRAP = document.getElementById('imgWrap');
+    const PLACEHOLDER_TEXT = IMG_WRAP.querySelector('.placeholder-text');
 
     // 处理包含空格的目录名
     const rawModelPath = './plant model1/model.json';
@@ -119,7 +128,7 @@
       try {
         // 绝大多数 model.json + model.weights.bin 是 tfjs-layers
         model = await tf.loadLayersModel(modelPath);
-        STATUS.textContent = '模型加载成功';
+        STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功</span>';
         // 自动读取输入尺寸
         const shape = model.inputs?.[0]?.shape || null;
         if (shape && shape.length >= 3) {
@@ -128,27 +137,27 @@
           const w = shape[2] || inputSize;
           // 若不一致取较小者以保持方形
           inputSize = Math.min(h || inputSize, w || inputSize) || inputSize;
-          STATUS.textContent += `，输入尺寸约为 ${inputSize}x${inputSize}`;
+          STATUS.innerHTML += `<br><span class="small">输入尺寸：${inputSize}x${inputSize}</span>`;
         }
         await tryLoadLabels();
         if (labels) {
-          STATUS.textContent += `（已解析到 ${labels.length} 个类别名）`;
+          STATUS.innerHTML += `<br><span class="small">识别类别：${labels.length} 种植物</span>`;
         }
         PREDICT_BTN.disabled = false;
       } catch (err) {
         console.warn('尝试以 tfjs-layers 加载失败，改用 GraphModel…', err);
         try {
           model = await tf.loadGraphModel(modelPath);
-          STATUS.textContent = '模型加载成功（GraphModel）';
+          STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功（GraphModel）</span>';
           // GraphModel 无法直接从 inputs.shape 读取，沿用默认 224
           await tryLoadLabels();
           if (labels) {
-            STATUS.textContent += `（已解析到 ${labels.length} 个类别名）`;
+            STATUS.innerHTML += `<br><span class="small">识别类别：${labels.length} 种植物</span>`;
           }
           PREDICT_BTN.disabled = false;
         } catch (err2) {
           console.error(err2);
-          STATUS.textContent = '模型加载失败，请检查 model.json 路径与类型';
+          STATUS.innerHTML = '<span style="color: #e53e3e;">❌ 模型加载失败，请检查 model.json 路径与类型</span>';
         }
       }
     }
@@ -159,11 +168,26 @@
       const tops = indexed.slice(0, topK);
 
       RESULTS.innerHTML = '';
-      tops.forEach(({ i, p }) => {
-        const name = labels && labels[i] ? labels[i] : `类别 #${i}`;
+      
+      if (tops.length === 0) {
+        RESULTS.innerHTML = '<div class="small">未识别到有效结果</div>';
+        return;
+      }
+
+      tops.forEach(({ i, p }, index) => {
+        const name = labels && labels[i] ? labels[i] : `植物类别 #${i + 1}`;
+        const percentage = (p * 100).toFixed(2);
+        const confidence = p > 0.8 ? '高' : p > 0.5 ? '中' : '低';
+        
         const div = document.createElement('div');
         div.className = 'result-item';
-        div.innerHTML = `<span>${name}</span><span>${(p * 100).toFixed(2)}%</span>`;
+        div.innerHTML = `
+          <div>
+            <strong>${index === 0 ? '🏆 ' : ''}${name}</strong>
+            <div class="small">置信度：${confidence}</div>
+          </div>
+          <div class="result-percentage">${percentage}%</div>
+        `;
         RESULTS.appendChild(div);
       });
     }
@@ -183,45 +207,97 @@
 
     async function predict() {
       if (!model || !PREVIEW.src) return;
-      RESULTS.innerHTML = '<div class="small">正在识别…</div>';
-      const input = preprocess(PREVIEW);
-      let output = null;
+      
+      // 保存按钮原始状态
+      const originalText = PREDICT_BTN.innerHTML;
+      PREDICT_BTN.disabled = true;
+      PREDICT_BTN.innerHTML = '⏳ 识别中...';
+      
+      RESULTS.innerHTML = '<div class="small" style="text-align: center; padding: 20px;">🔍 正在分析植物特征...</div>';
+      
       try {
-        output = model.predict ? model.predict(input) : model.execute(input);
-      } catch (e) {
-        // GraphModel 可能需要明确输出节点，回退 try/catch
+        const input = preprocess(PREVIEW);
+        let output = null;
+        
         try {
-          output = model.execute(input);
-        } catch (e2) {
-          console.error(e2);
-          RESULTS.innerHTML = '<div class="small">识别失败：无法执行模型</div>';
-          input.dispose();
-          return;
+          output = model.predict ? model.predict(input) : model.execute(input);
+        } catch (e) {
+          // GraphModel 可能需要明确输出节点，回退 try/catch
+          try {
+            output = model.execute(input);
+          } catch (e2) {
+            throw new Error('无法执行模型预测');
+          }
         }
-      }
 
-      try {
         // 兼容数组输出
         const outTensor = Array.isArray(output) ? output[0] : output;
         const probs = await outTensor.data();
         showResults(Array.from(probs));
         tf.dispose([input, output]);
+        
       } catch (e) {
         console.error(e);
-        RESULTS.innerHTML = '<div class="small">识别失败：输出不可解析</div>';
-        tf.dispose([input, output]);
+        RESULTS.innerHTML = `
+          <div style="text-align: center; padding: 20px; color: #e53e3e;">
+            <div>❌ 识别失败</div>
+            <div class="small">${e.message || '未知错误'}</div>
+          </div>
+        `;
+      } finally {
+        // 恢复按钮状态
+        PREDICT_BTN.disabled = false;
+        PREDICT_BTN.innerHTML = originalText;
       }
     }
 
-    FILE_INPUT.addEventListener('change', () => {
-      const file = FILE_INPUT.files?.[0];
-      if (!file) return;
+    function handleFileSelect(file) {
+      if (!file || !file.type.startsWith('image/')) {
+        alert('请选择有效的图片文件（JPG、PNG等格式）');
+        return;
+      }
+      
+      if (file.size > 10 * 1024 * 1024) {
+        alert('图片文件大小不能超过10MB');
+        return;
+      }
+      
       const url = URL.createObjectURL(file);
       PREVIEW.onload = () => {
         URL.revokeObjectURL(url);
         RESULTS.innerHTML = '';
+        PLACEHOLDER_TEXT.style.display = 'none';
+        PREVIEW.style.display = 'block';
       };
       PREVIEW.src = url;
+    }
+
+    FILE_INPUT.addEventListener('change', () => {
+      const file = FILE_INPUT.files?.[0];
+      handleFileSelect(file);
+    });
+
+    // 拖放功能
+    IMG_WRAP.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      IMG_WRAP.classList.add('drag-over');
+    });
+
+    IMG_WRAP.addEventListener('dragleave', (e) => {
+      e.preventDefault();
+      IMG_WRAP.classList.remove('drag-over');
+    });
+
+    IMG_WRAP.addEventListener('drop', (e) => {
+      e.preventDefault();
+      IMG_WRAP.classList.remove('drag-over');
+      const file = e.dataTransfer.files[0];
+      handleFileSelect(file);
+    });
+
+    // 点击预览区域也可以选择文件
+    IMG_WRAP.addEventListener('click', () => {
+      FILE_INPUT.click();
     });
 
     PREDICT_BTN.addEventListener('click', predict);
