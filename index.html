@@ -49,6 +49,40 @@
       </div>
       <div class="model-info">模型路径：<span class="kbd" id="modelPath"></span></div>
     </div>
+
+    <div class="card">
+      <div class="card-title">🛠️ 调试工具</div>
+      <div style="padding: 12px; background: #f7fafc; border-radius: 8px;">
+        <div style="margin-bottom: 12px;">
+          <label style="display: block; margin-bottom: 4px; font-weight: 500; color: #4a5568;">预处理模式：</label>
+          <select id="preprocessSelect" style="width: 100%; padding: 8px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; font-size: 14px;">
+            <option value="simple">模式1: 简单归一化 [0,1]</option>
+            <option value="imagenet">模式2: ImageNet标准化</option>
+            <option value="mobilenet_v2">模式3: MobileNetV2标准化 (推荐)</option>
+            <option value="range_neg1_1">模式4: 归一化到 [-1,1]</option>
+            <option value="none">模式5: 无标准化 [0,255]</option>
+            <option value="caffe">模式6: Caffe风格 (BGR)</option>
+          </select>
+        </div>
+        <div style="font-size: 12px; color: #718096; line-height: 1.5;">
+          💡 提示：如果预测结果不准确，请尝试切换预处理模式。大多数TensorFlow.js模型使用简单归一化。
+        </div>
+        <div style="margin-top: 12px;">
+          <label style="display: flex; align-items: center; cursor: pointer;">
+            <input type="checkbox" id="debugToggle" checked style="margin-right: 8px;">
+            <span style="font-size: 14px; color: #4a5568;">启用控制台调试信息</span>
+          </label>
+        </div>
+        <div style="margin-top: 12px;">
+          <button id="testAllBtn" style="width: 100%; padding: 10px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 14px;">
+            🧪 自动测试所有模式
+          </button>
+          <div style="font-size: 11px; color: #718096; margin-top: 6px; text-align: center;">
+            点击后将依次测试所有6种预处理模式
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
 
   <script>
@@ -69,6 +103,19 @@
     let model = null;
     let inputSize = 224; // 兜底默认
     let labels = null;   // 若后续提供 ./plant model1/labels.json 可自动加载
+    let modelType = null; // 记录模型类型
+    
+    // MobileNet 标准预处理参数
+    const IMAGENET_MEAN = [0.485, 0.456, 0.406];
+    const IMAGENET_STD = [0.229, 0.224, 0.225];
+    
+    // 调试模式（使用全局变量以便动态切换）
+    window.DEBUG_MODE = true;
+    
+    // 便捷访问函数
+    function isDebugMode() {
+      return window.DEBUG_MODE === true;
+    }
 
     // 从 model.json 中尝试解析类别名称（多种常见字段）
     async function tryLoadLabelsFromModelJson() {
@@ -128,7 +175,9 @@
       try {
         // 绝大多数 model.json + model.weights.bin 是 tfjs-layers
         model = await tf.loadLayersModel(modelPath);
-        STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功</span>';
+        modelType = 'layers';
+        STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功（LayersModel）</span>';
+        
         // 自动读取输入尺寸
         const shape = model.inputs?.[0]?.shape || null;
         if (shape && shape.length >= 3) {
@@ -139,17 +188,33 @@
           inputSize = Math.min(h || inputSize, w || inputSize) || inputSize;
           STATUS.innerHTML += `<br><span class="small">输入尺寸：${inputSize}x${inputSize}</span>`;
         }
+        
+        // 输出模型信息用于调试
+        if (isDebugMode()) {
+          console.log('模型类型:', modelType);
+          console.log('输入形状:', shape);
+          console.log('输出形状:', model.outputs?.[0]?.shape);
+          console.log('模型摘要:');
+          model.summary();
+        }
+        
         await tryLoadLabels();
         if (labels) {
           STATUS.innerHTML += `<br><span class="small">识别类别：${labels.length} 种植物</span>`;
+          if (isDebugMode()) {
+            console.log('标签列表:', labels);
+          }
         }
         PREDICT_BTN.disabled = false;
       } catch (err) {
         console.warn('尝试以 tfjs-layers 加载失败，改用 GraphModel…', err);
         try {
           model = await tf.loadGraphModel(modelPath);
+          modelType = 'graph';
           STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功（GraphModel）</span>';
           // GraphModel 无法直接从 inputs.shape 读取，沿用默认 224
+          STATUS.innerHTML += `<br><span class="small">输入尺寸：${inputSize}x${inputSize}</span>`;
+          
           await tryLoadLabels();
           if (labels) {
             STATUS.innerHTML += `<br><span class="small">识别类别：${labels.length} 种植物</span>`;
@@ -192,15 +257,85 @@
       });
     }
 
+    // 预处理模式配置
+    let preprocessMode = 'mobilenet_v2'; // 默认使用 MobileNetV2 标准预处理
+    
     function preprocess(imgEl) {
       return tf.tidy(() => {
         let t = tf.browser.fromPixels(imgEl);
+        
+        if (isDebugMode()) {
+          console.log('=== 图像预处理开始 ===');
+          console.log('原始图像形状:', t.shape);
+          console.log('原始图像值范围:', [tf.min(t).dataSync()[0], tf.max(t).dataSync()[0]]);
+        }
+        
         // 统一方形尺寸
         t = tf.image.resizeBilinear(t, [inputSize, inputSize], true);
-        // [0,1] 归一化
-        t = t.toFloat().div(255);
+        
+        // 转为浮点数
+        t = t.toFloat();
+        
+        // 根据模式选择预处理方式
+        if (preprocessMode === 'simple') {
+          // 模式1: 简单归一化到 [0,1]
+          t = t.div(255);
+          if (isDebugMode()) {
+            console.log('预处理模式: 简单归一化 [0,1]');
+          }
+        } else if (preprocessMode === 'imagenet') {
+          // 模式2: ImageNet 标准预处理
+          // 归一化到 [0,1] 然后标准化
+          t = t.div(255);
+          const mean = tf.tensor1d(IMAGENET_MEAN);
+          const std = tf.tensor1d(IMAGENET_STD);
+          t = t.sub(mean).div(std);
+          if (isDebugMode()) {
+            console.log('预处理模式: ImageNet标准化 (mean=[0.485,0.456,0.406], std=[0.229,0.224,0.225])');
+          }
+        } else if (preprocessMode === 'mobilenet_v2') {
+          // 模式3: MobileNetV2 / TensorFlow 标准预处理
+          // 归一化到 [-1, 1]
+          t = t.div(127.5).sub(1.0);
+          if (isDebugMode()) {
+            console.log('预处理模式: MobileNetV2标准化 [(x/127.5)-1] → [-1,1]');
+          }
+        } else if (preprocessMode === 'range_neg1_1') {
+          // 模式4: 另一种归一化到 [-1,1] 的方式
+          t = t.sub(127.5).div(127.5);
+          if (isDebugMode()) {
+            console.log('预处理模式: 归一化到 [-1,1] [(x-127.5)/127.5]');
+          }
+        } else if (preprocessMode === 'none') {
+          // 模式5: 不做归一化，保持 [0,255]
+          if (isDebugMode()) {
+            console.log('预处理模式: 无标准化 [0,255]');
+          }
+        } else if (preprocessMode === 'caffe') {
+          // 模式6: Caffe 风格 - BGR 顺序 + 减均值
+          // 转换 RGB -> BGR
+          const [r, g, b] = tf.split(t, 3, 2);
+          t = tf.concat([b, g, r], 2);
+          // 减去 ImageNet 均值 (BGR 顺序)
+          const mean = tf.tensor1d([103.939, 116.779, 123.68]);
+          t = t.sub(mean);
+          if (isDebugMode()) {
+            console.log('预处理模式: Caffe风格 (BGR + 减均值)');
+          }
+        }
+        
+        if (isDebugMode()) {
+          console.log('预处理后形状:', t.shape);
+          const minVal = tf.min(t).dataSync()[0];
+          const maxVal = tf.max(t).dataSync()[0];
+          const meanVal = tf.mean(t).dataSync()[0];
+          console.log('预处理后统计: min=' + minVal.toFixed(4) + ', max=' + maxVal.toFixed(4) + ', mean=' + meanVal.toFixed(4));
+          console.log('=== 图像预处理完成 ===');
+        }
+        
         // 增维： [1, H, W, C]
         t = t.expandDims(0);
+        
         return t;
       });
     }
@@ -216,28 +351,64 @@
       RESULTS.innerHTML = '<div class="small" style="text-align: center; padding: 20px;">🔍 正在分析植物特征...</div>';
       
       try {
+        if (isDebugMode()) {
+          console.log('=== 开始预测 ===');
+          console.log('模型类型:', modelType);
+        }
+        
         const input = preprocess(PREVIEW);
+        
+        if (isDebugMode()) {
+          console.log('输入张量形状:', input.shape);
+          console.log('输入张量值范围:', [tf.min(input).dataSync()[0], tf.max(input).dataSync()[0]]);
+        }
+        
         let output = null;
         
-        try {
-          output = model.predict ? model.predict(input) : model.execute(input);
-        } catch (e) {
-          // GraphModel 可能需要明确输出节点，回退 try/catch
+        // 根据模型类型使用不同的预测方法
+        if (modelType === 'layers') {
+          output = model.predict(input);
+        } else if (modelType === 'graph') {
+          output = model.execute(input);
+        } else {
+          // 兼容模式
           try {
-            output = model.execute(input);
-          } catch (e2) {
-            throw new Error('无法执行模型预测');
+            output = model.predict ? model.predict(input) : model.execute(input);
+          } catch (e) {
+            try {
+              output = model.execute(input);
+            } catch (e2) {
+              throw new Error('无法执行模型预测');
+            }
           }
         }
 
         // 兼容数组输出
         const outTensor = Array.isArray(output) ? output[0] : output;
+        
+        if (isDebugMode()) {
+          console.log('输出张量形状:', outTensor.shape);
+          console.log('输出张量值范围:', [tf.min(outTensor).dataSync()[0], tf.max(outTensor).dataSync()[0]]);
+        }
+        
         const probs = await outTensor.data();
-        showResults(Array.from(probs));
+        const probsArray = Array.from(probs);
+        
+        if (isDebugMode()) {
+          console.log('预测概率:', probsArray);
+          console.log('概率总和:', probsArray.reduce((a, b) => a + b, 0));
+          probsArray.forEach((p, i) => {
+            const label = labels && labels[i] ? labels[i] : `类别 ${i}`;
+            console.log(`  ${label}: ${(p * 100).toFixed(2)}%`);
+          });
+          console.log('=== 预测完成 ===');
+        }
+        
+        showResults(probsArray);
         tf.dispose([input, output]);
         
       } catch (e) {
-        console.error(e);
+        console.error('预测错误:', e);
         RESULTS.innerHTML = `
           <div style="text-align: center; padding: 20px; color: #e53e3e;">
             <div>❌ 识别失败</div>
@@ -301,6 +472,190 @@
     });
 
     PREDICT_BTN.addEventListener('click', predict);
+
+    // 自动测试所有模式
+    const TEST_ALL_BTN = document.getElementById('testAllBtn');
+    TEST_ALL_BTN.addEventListener('click', async () => {
+      if (!model || !PREVIEW.src) {
+        alert('⚠️ 请先上传图片！');
+        return;
+      }
+      
+      const modes = ['mobilenet_v2', 'range_neg1_1', 'simple', 'imagenet', 'caffe', 'none'];
+      const modeNames = {
+        'mobilenet_v2': '模式3: MobileNetV2 [-1,1]',
+        'range_neg1_1': '模式4: 另一种 [-1,1]',
+        'simple': '模式1: 简单 [0,1]',
+        'imagenet': '模式2: ImageNet标准化',
+        'caffe': '模式6: Caffe风格',
+        'none': '模式5: 无标准化 [0,255]'
+      };
+      
+      TEST_ALL_BTN.disabled = true;
+      TEST_ALL_BTN.innerHTML = '⏳ 测试中...';
+      
+      console.log('\n' + '='.repeat(70));
+      console.log('🧪 开始自动测试所有预处理模式');
+      console.log('='.repeat(70));
+      console.log('📸 当前图片已加载，将依次测试 6 种预处理模式\n');
+      
+      const results = [];
+      
+      for (let i = 0; i < modes.length; i++) {
+        const mode = modes[i];
+        preprocessMode = mode;
+        PREPROCESS_SELECT.value = mode;
+        
+        console.log(`\n[${ i + 1}/6] 测试 ${modeNames[mode]}`);
+        console.log('-'.repeat(70));
+        
+        try {
+          const input = preprocess(PREVIEW);
+          let output = null;
+          
+          if (modelType === 'layers') {
+            output = model.predict(input);
+          } else if (modelType === 'graph') {
+            output = model.execute(input);
+          } else {
+            output = model.predict ? model.predict(input) : model.execute(input);
+          }
+          
+          const outTensor = Array.isArray(output) ? output[0] : output;
+          const probs = await outTensor.data();
+          const probsArray = Array.from(probs);
+          
+          // 找出最高概率的类别
+          let maxProb = -1;
+          let maxIdx = -1;
+          probsArray.forEach((p, idx) => {
+            if (p > maxProb) {
+              maxProb = p;
+              maxIdx = idx;
+            }
+          });
+          
+          const predictedLabel = labels && labels[maxIdx] ? labels[maxIdx] : `类别 ${maxIdx}`;
+          
+          results.push({
+            mode: modeNames[mode],
+            label: predictedLabel,
+            confidence: maxProb,
+            probs: probsArray
+          });
+          
+          console.log(`✅ 预测结果: ${predictedLabel} (${(maxProb * 100).toFixed(2)}%)`);
+          console.log('完整概率分布:');
+          probsArray.forEach((p, idx) => {
+            const label = labels && labels[idx] ? labels[idx] : `类别 ${idx}`;
+            console.log(`  ${label}: ${(p * 100).toFixed(2)}%`);
+          });
+          
+          tf.dispose([input, output]);
+          
+          // 短暂延迟以便查看
+          await new Promise(resolve => setTimeout(resolve, 100));
+          
+        } catch (e) {
+          console.error(`❌ ${modeNames[mode]} 测试失败:`, e.message);
+          results.push({
+            mode: modeNames[mode],
+            label: '错误',
+            confidence: 0,
+            error: e.message
+          });
+        }
+      }
+      
+      // 输出汇总
+      console.log('\n' + '='.repeat(70));
+      console.log('📊 测试结果汇总');
+      console.log('='.repeat(70));
+      
+      const summary = {};
+      results.forEach(r => {
+        if (!r.error) {
+          if (!summary[r.label]) {
+            summary[r.label] = [];
+          }
+          summary[r.label].push({mode: r.mode, conf: r.confidence});
+        }
+      });
+      
+      console.log('\n按预测类别分组:');
+      Object.keys(summary).forEach(label => {
+        console.log(`\n🏷️  ${label}:`);
+        summary[label].forEach(item => {
+          console.log(`   ${item.mode}: ${(item.conf * 100).toFixed(2)}%`);
+        });
+      });
+      
+      console.log('\n' + '='.repeat(70));
+      console.log('💡 使用建议:');
+      console.log('   1. 查看哪个模式预测出了正确的类别（小草）');
+      console.log('   2. 选择该模式作为默认预处理方式');
+      console.log('   3. 用多张训练图片验证该模式的准确性');
+      console.log('='.repeat(70) + '\n');
+      
+      TEST_ALL_BTN.disabled = false;
+      TEST_ALL_BTN.innerHTML = '🧪 自动测试所有模式';
+      
+      alert('✅ 测试完成！请查看控制台查看详细结果。');
+    });
+
+    // 预处理模式切换
+    const PREPROCESS_SELECT = document.getElementById('preprocessSelect');
+    PREPROCESS_SELECT.addEventListener('change', (e) => {
+      preprocessMode = e.target.value;
+      console.log('\n' + '='.repeat(50));
+      console.log('🔄 预处理模式已切换为:', preprocessMode);
+      
+      const modeDescriptions = {
+        'simple': '简单归一化 x/255 → [0,1]',
+        'imagenet': 'ImageNet标准化 (x/255 - mean)/std',
+        'mobilenet_v2': 'MobileNetV2标准化 x/127.5 - 1 → [-1,1] ⭐推荐',
+        'range_neg1_1': '另一种[-1,1]方式 (x-127.5)/127.5',
+        'none': '无标准化，保持 [0,255]',
+        'caffe': 'Caffe风格 BGR + 减均值'
+      };
+      
+      console.log('📝 说明:', modeDescriptions[preprocessMode] || '未知模式');
+      console.log('💡 提示: 上传图片后点击"开始识别"测试此模式');
+      console.log('='.repeat(50) + '\n');
+      
+      // 如果已经有图片，提示可以重新预测
+      if (PREVIEW.src && model) {
+        console.log('ℹ️  检测到已上传图片，可以直接点击"开始识别"按钮测试新模式');
+      }
+    });
+
+    // 调试开关
+    const DEBUG_TOGGLE = document.getElementById('debugToggle');
+    DEBUG_TOGGLE.addEventListener('change', (e) => {
+      window.DEBUG_MODE = e.target.checked;
+      console.log('调试模式:', window.DEBUG_MODE ? '开启' : '关闭');
+    });
+    
+    // 初始化预处理模式
+    preprocessMode = 'mobilenet_v2'; // 设置默认值为 MobileNetV2
+    PREPROCESS_SELECT.value = 'mobilenet_v2'; // 同步下拉框
+    
+    console.log('\n' + '='.repeat(60));
+    console.log('🌿 植物识别系统已启动');
+    console.log('='.repeat(60));
+    console.log('📌 默认预处理模式: MobileNetV2标准化 [-1,1]');
+    console.log('📌 这是TensorFlow预训练MobileNet模型的标准预处理方式');
+    console.log('');
+    console.log('🔧 如果训练集图片预测错误，请尝试以下步骤:');
+    console.log('  1️⃣  上传小草的训练图片');
+    console.log('  2️⃣  查看控制台的预测结果');
+    console.log('  3️⃣  如果错误，切换预处理模式并重新识别');
+    console.log('  4️⃣  测试所有6种模式，找出正确结果的模式');
+    console.log('');
+    console.log('💡 建议测试顺序:');
+    console.log('   模式3 (MobileNetV2) → 模式4 ([-1,1]) → 模式1 ([0,1])');
+    console.log('   → 模式2 (ImageNet) → 模式6 (Caffe) → 模式5 ([0,255])');
+    console.log('='.repeat(60) + '\n');
 
     // 初始化
     loadModel();
