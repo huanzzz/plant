@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>植物识别演示 - TFJS 模型</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 24px; color: #222; }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    .card { border: 1px solid #e5e7eb; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .row { display: flex; gap: 16px; flex-wrap: wrap; }
+    .img-wrap { width: 320px; min-height: 240px; border: 1px dashed #cbd5e1; border-radius: 8px; display: flex; align-items: center; justify-content: center; overflow: hidden; background: #f8fafc; }
+    #preview { max-width: 100%; max-height: 320px; }
+    button, input[type="file"] { padding: 8px 12px; border: 1px solid #cbd5e1; border-radius: 6px; background: #fff; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .status { font-size: 13px; color: #555; }
+    .results { margin-top: 8px; }
+    .result-item { display: flex; justify-content: space-between; padding: 6px 8px; border-bottom: 1px solid #eee; }
+    .result-item:last-child { border-bottom: none; }
+    .small { font-size: 12px; color: #666; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 4px; padding: 2px 6px; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
+</head>
+<body>
+  <h1>植物识别演示（TFJS）</h1>
+
+  <div class="card">
+    <div class="status" id="status">正在加载模型…</div>
+    <div class="small">模型路径：<span class="kbd" id="modelPath"></span></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <div>
+        <input type="file" id="fileInput" accept="image/*" />
+        <button id="predictBtn" disabled>开始识别</button>
+        <div class="small">提示：选择一张植物图片后点击识别</div>
+      </div>
+      <div class="img-wrap">
+        <img id="preview" alt="图片预览" />
+      </div>
+    </div>
+    <div class="results" id="results"></div>
+  </div>
+
+  <script>
+    const STATUS = document.getElementById('status');
+    const MODEL_PATH_EL = document.getElementById('modelPath');
+    const FILE_INPUT = document.getElementById('fileInput');
+    const PREVIEW = document.getElementById('preview');
+    const PREDICT_BTN = document.getElementById('predictBtn');
+    const RESULTS = document.getElementById('results');
+
+    // 处理包含空格的目录名
+    const rawModelPath = './plant model1/model.json';
+    const modelPath = encodeURI(rawModelPath);
+    MODEL_PATH_EL.textContent = rawModelPath;
+
+    let model = null;
+    let inputSize = 224; // 兜底默认
+    let labels = null;   // 若后续提供 ./plant model1/labels.json 可自动加载
+
+    // 从 model.json 中尝试解析类别名称（多种常见字段）
+    async function tryLoadLabelsFromModelJson() {
+      try {
+        const res = await fetch(modelPath);
+        if (!res.ok) return false;
+        const j = await res.json();
+        const candidates = [
+          j?.userDefinedMetadata?.outputLabels,
+          j?.userDefinedMetadata?.labels,
+          j?.userDefinedMetadata?.classes,
+          j?.metadata?.labels,
+          j?.class_names,
+          j?.modelTopology?.training_config?.class_names,
+          j?.signature?.labels
+        ];
+        for (const c of candidates) {
+          if (Array.isArray(c) && c.length && typeof c[0] === 'string') {
+            labels = c;
+            return true;
+          }
+        }
+        // 有些导出会把 labels 放在 userDefinedMetadata 下的任意键
+        const udm = j?.userDefinedMetadata;
+        if (udm && typeof udm === 'object') {
+          for (const k of Object.keys(udm)) {
+            const v = udm[k];
+            if (Array.isArray(v) && v.length && typeof v[0] === 'string') {
+              labels = v;
+              return true;
+            }
+          }
+        }
+        return false;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    async function tryLoadLabels() {
+      // 优先从 model.json 解析
+      const ok = await tryLoadLabelsFromModelJson();
+      if (ok) return;
+      // 回退到独立 labels.json
+      try {
+        const labelsPath = encodeURI('./plant model1/labels.json');
+        const res = await fetch(labelsPath);
+        if (res.ok) {
+          labels = await res.json();
+        }
+      } catch (e) {
+        // 无 labels.json 时忽略
+      }
+    }
+
+    async function loadModel() {
+      try {
+        // 绝大多数 model.json + model.weights.bin 是 tfjs-layers
+        model = await tf.loadLayersModel(modelPath);
+        STATUS.textContent = '模型加载成功';
+        // 自动读取输入尺寸
+        const shape = model.inputs?.[0]?.shape || null;
+        if (shape && shape.length >= 3) {
+          // 形如 [null, H, W, C]
+          const h = shape[1] || inputSize;
+          const w = shape[2] || inputSize;
+          // 若不一致取较小者以保持方形
+          inputSize = Math.min(h || inputSize, w || inputSize) || inputSize;
+          STATUS.textContent += `，输入尺寸约为 ${inputSize}x${inputSize}`;
+        }
+        await tryLoadLabels();
+        if (labels) {
+          STATUS.textContent += `（已解析到 ${labels.length} 个类别名）`;
+        }
+        PREDICT_BTN.disabled = false;
+      } catch (err) {
+        console.warn('尝试以 tfjs-layers 加载失败，改用 GraphModel…', err);
+        try {
+          model = await tf.loadGraphModel(modelPath);
+          STATUS.textContent = '模型加载成功（GraphModel）';
+          // GraphModel 无法直接从 inputs.shape 读取，沿用默认 224
+          await tryLoadLabels();
+          if (labels) {
+            STATUS.textContent += `（已解析到 ${labels.length} 个类别名）`;
+          }
+          PREDICT_BTN.disabled = false;
+        } catch (err2) {
+          console.error(err2);
+          STATUS.textContent = '模型加载失败，请检查 model.json 路径与类型';
+        }
+      }
+    }
+
+    function showResults(probArray, topK = 5) {
+      const indexed = probArray.map((p, i) => ({ i, p }));
+      indexed.sort((a, b) => b.p - a.p);
+      const tops = indexed.slice(0, topK);
+
+      RESULTS.innerHTML = '';
+      tops.forEach(({ i, p }) => {
+        const name = labels && labels[i] ? labels[i] : `类别 #${i}`;
+        const div = document.createElement('div');
+        div.className = 'result-item';
+        div.innerHTML = `<span>${name}</span><span>${(p * 100).toFixed(2)}%</span>`;
+        RESULTS.appendChild(div);
+      });
+    }
+
+    function preprocess(imgEl) {
+      return tf.tidy(() => {
+        let t = tf.browser.fromPixels(imgEl);
+        // 统一方形尺寸
+        t = tf.image.resizeBilinear(t, [inputSize, inputSize], true);
+        // [0,1] 归一化
+        t = t.toFloat().div(255);
+        // 增维： [1, H, W, C]
+        t = t.expandDims(0);
+        return t;
+      });
+    }
+
+    async function predict() {
+      if (!model || !PREVIEW.src) return;
+      RESULTS.innerHTML = '<div class="small">正在识别…</div>';
+      const input = preprocess(PREVIEW);
+      let output = null;
+      try {
+        output = model.predict ? model.predict(input) : model.execute(input);
+      } catch (e) {
+        // GraphModel 可能需要明确输出节点，回退 try/catch
+        try {
+          output = model.execute(input);
+        } catch (e2) {
+          console.error(e2);
+          RESULTS.innerHTML = '<div class="small">识别失败：无法执行模型</div>';
+          input.dispose();
+          return;
+        }
+      }
+
+      try {
+        // 兼容数组输出
+        const outTensor = Array.isArray(output) ? output[0] : output;
+        const probs = await outTensor.data();
+        showResults(Array.from(probs));
+        tf.dispose([input, output]);
+      } catch (e) {
+        console.error(e);
+        RESULTS.innerHTML = '<div class="small">识别失败：输出不可解析</div>';
+        tf.dispose([input, output]);
+      }
+    }
+
+    FILE_INPUT.addEventListener('change', () => {
+      const file = FILE_INPUT.files?.[0];
+      if (!file) return;
+      const url = URL.createObjectURL(file);
+      PREVIEW.onload = () => {
+        URL.revokeObjectURL(url);
+        RESULTS.innerHTML = '';
+      };
+      PREVIEW.src = url;
+    });
+
+    PREDICT_BTN.addEventListener('click', predict);
+
+    // 初始化
+    loadModel();
+  </script>
+</body>
+</html>
