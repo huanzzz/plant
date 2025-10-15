@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <link rel="stylesheet" href="style.css">
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.18.0/dist/tf.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
   <div class="container">
@@ -14,9 +15,20 @@
       <div class="subtitle">欢仔小组</div>
     </header>
 
-
-
     <div class="main-content">
+      <div class="card">
+        <div class="card-title">📦 上传模型文件</div>
+        <div class="upload-section">
+          <div class="file-input-wrapper">
+            <label class="file-input-label">
+              📂 选择模型压缩包
+              <input type="file" id="modelInput" accept=".zip" />
+            </label>
+          </div>
+          <div class="small">支持 ZIP 格式，需包含 model.json 和 model.weights.bin</div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-title">上传植物图片</div>
         <div class="upload-section">
@@ -88,6 +100,7 @@
   <script>
     const STATUS = document.getElementById('status');
     const MODEL_PATH_EL = document.getElementById('modelPath');
+    const MODEL_INPUT = document.getElementById('modelInput');
     const FILE_INPUT = document.getElementById('fileInput');
     const PREVIEW = document.getElementById('preview');
     const PREDICT_BTN = document.getElementById('predictBtn');
@@ -95,15 +108,11 @@
     const IMG_WRAP = document.getElementById('imgWrap');
     const PLACEHOLDER_TEXT = IMG_WRAP.querySelector('.placeholder-text');
 
-    // 处理包含空格的目录名
-    const rawModelPath = './plant model1/model.json';
-    const modelPath = encodeURI(rawModelPath);
-    MODEL_PATH_EL.textContent = rawModelPath;
-
     let model = null;
     let inputSize = 224; // 兜底默认
-    let labels = null;   // 若后续提供 ./plant model1/labels.json 可自动加载
+    let labels = null;   // 从模型文件中加载
     let modelType = null; // 记录模型类型
+    let modelFiles = null; // 存储上传的模型文件
     
     // MobileNet 标准预处理参数
     const IMAGENET_MEAN = [0.485, 0.456, 0.406];
@@ -118,11 +127,9 @@
     }
 
     // 从 model.json 中尝试解析类别名称（多种常见字段）
-    async function tryLoadLabelsFromModelJson() {
+    async function tryLoadLabelsFromModelJson(modelJsonData) {
       try {
-        const res = await fetch(modelPath);
-        if (!res.ok) return false;
-        const j = await res.json();
+        const j = modelJsonData;
         const candidates = [
           j?.userDefinedMetadata?.outputLabels,
           j?.userDefinedMetadata?.labels,
@@ -155,75 +162,106 @@
       }
     }
 
-    async function tryLoadLabels() {
+    async function tryLoadLabels(modelJsonData) {
       // 优先从 model.json 解析
-      const ok = await tryLoadLabelsFromModelJson();
+      const ok = await tryLoadLabelsFromModelJson(modelJsonData);
       if (ok) return;
-      // 回退到独立 labels.json
-      try {
-        const labelsPath = encodeURI('./plant model1/labels.json');
-        const res = await fetch(labelsPath);
-        if (res.ok) {
-          labels = await res.json();
+      // 可以在zip中包含labels.json文件作为备选
+      if (modelFiles && modelFiles['labels.json']) {
+        try {
+          const labelsText = await modelFiles['labels.json'].async('text');
+          labels = JSON.parse(labelsText);
+        } catch (e) {
+          // 无 labels.json 时忽略
         }
-      } catch (e) {
-        // 无 labels.json 时忽略
       }
     }
 
     async function loadModel() {
+      if (!modelFiles) {
+        STATUS.innerHTML = '<span style="color: #f59e0b;">⚠️ 请先上传模型文件</span>';
+        return;
+      }
+
       try {
-        // 绝大多数 model.json + model.weights.bin 是 tfjs-layers
-        model = await tf.loadLayersModel(modelPath);
-        modelType = 'layers';
-        STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功（LayersModel）</span>';
+        STATUS.innerHTML = '<span class="loading"></span> 正在加载模型…';
         
-        // 自动读取输入尺寸
-        const shape = model.inputs?.[0]?.shape || null;
-        if (shape && shape.length >= 3) {
-          // 形如 [null, H, W, C]
-          const h = shape[1] || inputSize;
-          const w = shape[2] || inputSize;
-          // 若不一致取较小者以保持方形
-          inputSize = Math.min(h || inputSize, w || inputSize) || inputSize;
+        // 从上传的文件创建 IOHandler
+        const modelJsonText = await modelFiles['model.json'].async('text');
+        const modelJsonData = JSON.parse(modelJsonText);
+        const weightsBlob = await modelFiles['model.weights.bin'].async('blob');
+        const weightData = await weightsBlob.arrayBuffer();
+        
+        // 提取 weight specs
+        let weightSpecs = [];
+        if (modelJsonData.weightsManifest && modelJsonData.weightsManifest.length > 0) {
+          weightSpecs = modelJsonData.weightsManifest[0].weights || [];
+        }
+        
+        // 创建自定义 IOHandler
+        const customIOHandler = {
+          load: async () => {
+            return {
+              modelTopology: modelJsonData.modelTopology,
+              format: modelJsonData.format,
+              generatedBy: modelJsonData.generatedBy,
+              convertedBy: modelJsonData.convertedBy,
+              weightSpecs: weightSpecs,
+              weightData: weightData,
+              userDefinedMetadata: modelJsonData.userDefinedMetadata
+            };
+          }
+        };
+        
+        // 尝试作为 LayersModel 加载
+        try {
+          model = await tf.loadLayersModel(customIOHandler);
+          modelType = 'layers';
+          STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功（LayersModel）</span>';
+          
+          // 自动读取输入尺寸
+          const shape = model.inputs?.[0]?.shape || null;
+          if (shape && shape.length >= 3) {
+            // 形如 [null, H, W, C]
+            const h = shape[1] || inputSize;
+            const w = shape[2] || inputSize;
+            // 若不一致取较小者以保持方形
+            inputSize = Math.min(h || inputSize, w || inputSize) || inputSize;
+            STATUS.innerHTML += `<br><span class="small">输入尺寸：${inputSize}x${inputSize}</span>`;
+          }
+          
+          // 输出模型信息用于调试
+          if (isDebugMode()) {
+            console.log('模型类型:', modelType);
+            console.log('输入形状:', shape);
+            console.log('输出形状:', model.outputs?.[0]?.shape);
+            console.log('模型摘要:');
+            model.summary();
+          }
+        } catch (err) {
+          console.warn('尝试以 tfjs-layers 加载失败，改用 GraphModel…', err);
+          model = await tf.loadGraphModel(customIOHandler);
+          modelType = 'graph';
+          STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功（GraphModel）</span>';
+          // GraphModel 无法直接从 inputs.shape 读取，沿用默认 224
           STATUS.innerHTML += `<br><span class="small">输入尺寸：${inputSize}x${inputSize}</span>`;
         }
         
-        // 输出模型信息用于调试
-        if (isDebugMode()) {
-          console.log('模型类型:', modelType);
-          console.log('输入形状:', shape);
-          console.log('输出形状:', model.outputs?.[0]?.shape);
-          console.log('模型摘要:');
-          model.summary();
-        }
-        
-        await tryLoadLabels();
+        await tryLoadLabels(modelJsonData);
         if (labels) {
           STATUS.innerHTML += `<br><span class="small">识别类别：${labels.length} 种植物</span>`;
           if (isDebugMode()) {
             console.log('标签列表:', labels);
           }
         }
+        
+        MODEL_PATH_EL.textContent = '用户上传的模型';
         PREDICT_BTN.disabled = false;
+        
       } catch (err) {
-        console.warn('尝试以 tfjs-layers 加载失败，改用 GraphModel…', err);
-        try {
-          model = await tf.loadGraphModel(modelPath);
-          modelType = 'graph';
-          STATUS.innerHTML = '<span style="color: #48bb78;">✅ 模型加载成功（GraphModel）</span>';
-          // GraphModel 无法直接从 inputs.shape 读取，沿用默认 224
-          STATUS.innerHTML += `<br><span class="small">输入尺寸：${inputSize}x${inputSize}</span>`;
-          
-          await tryLoadLabels();
-          if (labels) {
-            STATUS.innerHTML += `<br><span class="small">识别类别：${labels.length} 种植物</span>`;
-          }
-          PREDICT_BTN.disabled = false;
-        } catch (err2) {
-          console.error(err2);
-          STATUS.innerHTML = '<span style="color: #e53e3e;">❌ 模型加载失败，请检查 model.json 路径与类型</span>';
-        }
+        console.error('模型加载失败:', err);
+        STATUS.innerHTML = '<span style="color: #e53e3e;">❌ 模型加载失败：' + err.message + '</span>';
+        MODEL_PATH_EL.textContent = '加载失败';
       }
     }
 
@@ -443,6 +481,75 @@
       PREVIEW.src = url;
     }
 
+    // 处理模型文件上传
+    MODEL_INPUT.addEventListener('change', async () => {
+      const file = MODEL_INPUT.files?.[0];
+      if (!file) return;
+      
+      if (!file.name.endsWith('.zip')) {
+        alert('⚠️ 请选择 ZIP 格式的模型压缩包');
+        return;
+      }
+      
+      try {
+        STATUS.innerHTML = '<span class="loading"></span> 正在解压模型文件…';
+        MODEL_PATH_EL.textContent = '解压中...';
+        
+        const zip = await JSZip.loadAsync(file);
+        
+        // 查找 model.json 和 model.weights.bin
+        let modelJson = null;
+        let weightsFile = null;
+        
+        // 遍历zip文件，寻找model.json和weights文件
+        for (const [filename, fileObj] of Object.entries(zip.files)) {
+          if (fileObj.dir) continue;
+          
+          const baseName = filename.split('/').pop();
+          if (baseName === 'model.json') {
+            modelJson = fileObj;
+          } else if (baseName === 'model.weights.bin' || baseName.endsWith('.weights.bin')) {
+            weightsFile = fileObj;
+          }
+        }
+        
+        if (!modelJson || !weightsFile) {
+          throw new Error('压缩包中缺少必需文件（model.json 或 model.weights.bin）');
+        }
+        
+        modelFiles = {
+          'model.json': modelJson,
+          'model.weights.bin': weightsFile
+        };
+        
+        // 检查是否有labels.json
+        for (const [filename, fileObj] of Object.entries(zip.files)) {
+          if (fileObj.dir) continue;
+          const baseName = filename.split('/').pop();
+          if (baseName === 'labels.json') {
+            modelFiles['labels.json'] = fileObj;
+            break;
+          }
+        }
+        
+        console.log('✅ 模型文件解压成功');
+        console.log('- model.json:', modelJson.name);
+        console.log('- weights:', weightsFile.name);
+        if (modelFiles['labels.json']) {
+          console.log('- labels.json:', modelFiles['labels.json'].name);
+        }
+        
+        // 自动加载模型
+        await loadModel();
+        
+      } catch (err) {
+        console.error('模型上传失败:', err);
+        STATUS.innerHTML = '<span style="color: #e53e3e;">❌ ' + err.message + '</span>';
+        MODEL_PATH_EL.textContent = '加载失败';
+        alert('❌ 模型上传失败：' + err.message);
+      }
+    });
+
     FILE_INPUT.addEventListener('change', () => {
       const file = FILE_INPUT.files?.[0];
       handleFileSelect(file);
@@ -646,6 +753,11 @@
     console.log('📌 默认预处理模式: MobileNetV2标准化 [-1,1]');
     console.log('📌 这是TensorFlow预训练MobileNet模型的标准预处理方式');
     console.log('');
+    console.log('📦 使用步骤:');
+    console.log('  1️⃣  上传模型压缩包（包含 model.json 和 model.weights.bin）');
+    console.log('  2️⃣  等待模型加载完成');
+    console.log('  3️⃣  上传植物图片进行识别');
+    console.log('');
     console.log('🔧 如果训练集图片预测错误，请尝试以下步骤:');
     console.log('  1️⃣  上传小草的训练图片');
     console.log('  2️⃣  查看控制台的预测结果');
@@ -657,8 +769,9 @@
     console.log('   → 模式2 (ImageNet) → 模式6 (Caffe) → 模式5 ([0,255])');
     console.log('='.repeat(60) + '\n');
 
-    // 初始化
-    loadModel();
+    // 初始化状态
+    STATUS.innerHTML = '<span style="color: #f59e0b;">⚠️ 请上传模型文件</span>';
+    MODEL_PATH_EL.textContent = '未上传';
   </script>
 </body>
 </html>
